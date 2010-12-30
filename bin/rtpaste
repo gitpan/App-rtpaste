@@ -1,0 +1,299 @@
+#! /usr/bin/perl 
+#vim:filetype=perl
+=head1 NAME
+
+rt-ticket - see your tickets from the command line
+
+=cut
+ 
+use strict;
+use warnings; 
+ 
+use Error qw(:try);
+use RT::Client::REST;
+ 
+use App::Rad; App::Rad->run();
+ 
+sub setup { 
+  
+    my $c=shift;
+    $c->register_commands( qw[ create ticket search spit get put ] );
+
+    # queries contains a list of saved queries you can run against rt
+    # you can include some in your $rcfile, they are loaded below 
+    #
+    # each entry in the hash has 4 parts
+    # entries from the config file can overwrite the ones here
+    #    
+    #  $name =>   - this is the name that you use on the command line 
+    #  [
+    #   $label    - a nice descriptive name for the help
+    #   $query    - the tickets to search out (see Tickets > Advanced)
+    #   $format   - an sprintf format for each ticket in the result
+    #               (\t and \t are expanded, the rest is literal
+    #   \@columns - which columns from the ticket to pass to the format
+    # ]
+    $c->stash->{queries} = {
+        bookmarked  => [
+            '(rt.cpan.org) bookmarked tickets',
+            q{ id = '__Bookmarked__' }
+        ],
+        unowned     => [
+            'Unowned new/open tickets',
+            q{ Owner = 'Nobody' AND ( Status = 'new' OR Status = 'open') }
+        ],
+        mine        => [
+            'My tickets',
+            q{ Owner = '__CurrentUser__'
+                AND (  Status = 'new' OR Status = 'open' ) }
+        ],
+    };
+ 
+    use File::Basename ();
+    use File::Spec::Functions ();
+    my $script = File::Basename::basename($0);
+
+    # where is our rc file?
+    my $rcfile = $ENV{ (uc $script).'_RC' }
+        || File::Spec::Functions::catfile ( 
+                $ENV{HOMEPATH}
+                || $ENV{HOME}
+                || glob ('~'), 
+                ".".$script.".rc"
+    );
+    $c->load_config( $rcfile ) if -f $rcfile;
+
+    # we definately need these ...
+    die  join ("\n", "$rcfile should contain:",
+         "\thost:(the url of an rt instance)",
+         "\tuser:(your rt username)",
+         "\tpass:(your rt password)",
+         "got: " . Data::Dumper::Dumper( $c->config )
+    ) if grep {not exists $c->config->{$_}} qw[ host user pass ];
+
+    #
+    # settings for how a search will look by default
+    #
+
+    # list of column names, in order, separated by,
+    $c->stash->{result_columns} = [
+        split /,/,
+            ( defined $c->config->{default_columns} )
+                    ? $c->config->{default_columns} 
+                    : 'id,Owner,Subject,Status,Requestors,LastUpdated'
+    ];
+
+    # format to be used if a search doesn't have its own 
+    $c->stash->{result_format} = expand (
+            ( defined $c->config->{default_format} )
+                    ? $c->config->{default_format}
+                    : '%-6s (%s) %s [%s]\n  %s %s\n'
+    );
+
+    #
+    # load searches from the config...
+    #
+    # since the config parser that comes with App::Rad is simple, we just 
+    # use _'s in the keys to specify which part of the search it is...
+    # 
+    # the %s will be used as the name of the search
+    # 
+    #    search_%s   - the conditions 
+    #    format_%s   - the printf string 
+    #    columns_%s  - comma list of columns to display
+    #
+    # example: to see all the tickets belonging to Acme::Meow on rt.cpan.org:
+    #
+    #    search_Acme-Meow = Queue='Acme-Meow'
+    #    columns_Acme-Meow= id,Owner,Subject,Status,Requestors,LastUpdated 
+    #    format_Acme-Meow = %-6s (%s) %s [%s]\n  %s %s\n
+    #
+    #    host: http://rt.cpan.org
+    #    user: FOOLISH
+    #    pass: toosneaky
+    #
+    #
+    # ./rt-ticket search Acme-Meow
+    #
+    # each config item is processed separately so they can mask the existing
+    # settings. (even parts of the default searches)
+
+    for my $name (keys %{ $c->config }) {
+        if ((my $desc = $name) =~ s/^search_//) {
+            # stash the query strings, as they came from the file
+            @{ $c->stash->{queries}->{$desc} }[0,1] = (
+                "[from rc]$name" => $c->config->{$name}
+            );
+        }
+        if ((my $desc = $name) =~ s/^format_//) {
+            @{ $c->stash->{queries}->{$desc} }[0,2] = (
+                "[from rc]$name" => expand($c->config->{$name})
+            )
+        }
+        if ((my $desc = $name) =~ s/^columns_//){
+            # split the column list and stick it in the query structure
+            @{ $c->stash->{queries}->{$desc} }[0,2] = (
+                "[from rc]$name" => [split ' ', $c->config->{$name}] 
+            );
+        }
+    }
+    
+    
+    # "connect" to RT ...
+    $c->stash->{rt} = RT::Client::REST->new(
+        server => $c->config->{host} || 'http://rt.cpan.org/',
+        timeout => 30,
+    );
+
+    # ... and login 
+    try {
+        $c->stash->{rt}->login(
+            username => $c->config->{user},
+            password => $c->config->{pass}
+        );
+    } catch Exception::Class::Base with {
+        die  "problem logging in: ", shift->message;
+    };
+}
+
+sub ticket { 
+  my $c=shift;
+  my $rt = $c->stash->{rt};
+  my ($id) = @ARGV;
+  try {
+    # Get ticket #10
+    my $ticket = $rt->show(type => 'ticket', id => $id);
+
+    use Data::Dumper();print Data::Dumper::Dumper $ticket;
+  } catch RT::Client::REST::Exception with {
+    return "problem when finding ticket #$id: " . shift->message;
+  };
+
+}
+
+
+sub search :Help('Run pre-defined queries'){
+    my $c=shift;
+    my $rt = $c->stash->{rt};
+    my %queries = %{ $c->stash->{queries}  };
+
+    my ($query_name) = @ARGV;
+
+    if (0 == @ARGV or not $queries{$query_name}) {
+        my $longest = -1;;
+        $longest = length($_) > $longest ? length($_) : $longest for keys %queries;
+        return "Pick a query to run $query_name:\n".
+            (join"",
+                map { 
+                    sprintf "%-${longest}s - %s\n" ,
+                    $_, $queries{$_}[0]
+                } keys %queries
+            )
+                
+    }
+
+
+    my ($query_desc, $query, $format, $cols) = @{ $queries{ $query_name } };
+
+    try {
+        # search only gives back ticket numbers, so we'll grab the tickets too
+        my @tickets = map {
+                        $rt->show(type => 'ticket', id => $_)
+                    } $rt->search(type => 'ticket', query => $query );
+                    print Data::Dumper::Dumper \@tickets;
+        for (@tickets){
+            printf +($format || $c->stash->{result_format}),
+                @{$_}{ @{ $cols || $c->stash->{result_columns} } }
+        }
+        print "All done, nice work!\n" unless @tickets;
+    } catch RT::Client::REST::Exception with {
+        return "bad shit when searching '$query': ". shift->message;
+    };
+}
+
+sub put {goto &create};
+
+sub create :Help('create a ticket, requires --queue, --subject and --message') {
+    my $c = shift;
+    my $rt = $c->stash->{rt};
+
+    my $queue   = $c->options->{queue};
+    my $subject = $c->options->{subject};
+    my $message = $c->options->{message};
+
+    if (not exists $c->options->{message} or $message eq '') {
+        warn "reading ticket contents from stdin";
+        $message = do { local $/; <STDIN> }
+    }
+
+    if ( not defined $queue or $queue eq '' ) {
+        $?=3; return "I need a queue to create the ticket in.";
+    }
+    if ( not defined $message or $message eq '' ) {
+        $?=3; return "What would you like to put in the ticket?";
+    }
+    if ( not defined $subject or $subject eq '' ) {
+        $?=3; return "What would you like as the subject?";
+    }
+
+    $rt->create(
+        type => 'ticket',
+        set => {
+            Queue   => $queue,
+            Subject => $subject
+        },
+        text => $message
+    );
+}
+
+sub get :Help('print the body of the message that created the ticket. id is the first argument') {
+
+    my $c=shift;
+    my $rt = $c->stash->{rt};
+    my ($id) = @ARGV;
+    return "get needs a ticket id ... $0 get <id>" unless defined $id;
+
+    my $host_regex = '^'.quotemeta($c->config->{host});
+    $host_regex = qr($host_regex);
+
+    if ($id =~ $host_regex ) {
+        # this is on the rt that is in your config...
+        # this will get confused by https vs http
+        $id = $1 if $id =~ /id=(\d+)/
+    }
+    elsif ( $id =~ qr{^https?://} ) {
+        die "$id is not a ticket on " . $c->config->{host} 
+    }
+
+    if ($id + 0 != $id) { 
+        die "what the fuck is a $id?"
+    }
+
+
+    try {
+        my $ticket = $rt->show(type => 'ticket', id => $id);
+
+        return $rt->get_transaction (parent_id => $id, id => (
+            $rt->get_transaction_ids (parent_id=>$id,
+                transaction_type =>'Create' ,
+                ))[0]
+            )->{Content};
+    } catch RT::Client::REST::Exception with {
+        return "problem when finding ticket #$id: " . shift->message;
+    }
+
+}
+
+# expand \t, \n and \\ in formats
+sub expand  {
+    my ($string) = @_;#@return = @_;
+    s/(\\[tn\\])/{'\\\\' => '\\','\n' => "\n",'\r' => "\t"}->{$1}/ge
+            for $string;
+    $string
+}
+sub spit {
+    my $c = shift;
+    use Data::Dumper (); 
+    delete $c->stash->{rt};
+    Data::Dumper::Dumper( $c->config, $c->stash );
+} 

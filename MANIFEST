@@ -1,0 +1,8 @@
+LICENSE
+MANIFEST
+META.yml
+Makefile.PL
+README
+bin/rtpaste
+dist.ini
+t/00-cats.t
