@@ -1,75 +1,200 @@
 #! /usr/bin/perl 
-#vim:filetype=perl
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+# ABSTRACT: rtpaste - see your tickets from the command line
+
 =head1 NAME
 
-rt-ticket - see your tickets from the command line
+rtpaste - see your tickets from the command line
+
+=head1 DESCRIPTION
+
+Let's you pipe commands to and from request tracker tickets (L<http://bestpractical.com/rt/>)
+
+This is more designed for colaborative programming, but there is no reason you could not use it 
+as part of some bigger automation
+
+=head1 USAGE
+
+ rtpaste [COMMAND] options
+
+=head1 COMMANDS 
 
 =cut
  
 use strict;
 use warnings; 
+our $DEFAULT_RT = 'http://rt.cpan.org/';
  
 use Error qw(:try);
 use RT::Client::REST;
  
 use App::Rad; App::Rad->run();
- 
-sub setup { 
-  
+
+
+=head2 setup  - tell me your rt password
+
+A good place to start if you've not used rtpaste before
+
+You will be asked to do setup automatically if you have not already, 
+you just need to provide the url, username and password for request tracker
+
+=cut
+
+sub configure : Help('tell me your rt password') {
     my $c=shift;
-    $c->register_commands( qw[ create ticket search spit get put ] );
+    my $choice = shift;
 
-    # queries contains a list of saved queries you can run against rt
-    # you can include some in your $rcfile, they are loaded below 
-    #
-    # each entry in the hash has 4 parts
-    # entries from the config file can overwrite the ones here
-    #    
-    #  $name =>   - this is the name that you use on the command line 
-    #  [
-    #   $label    - a nice descriptive name for the help
-    #   $query    - the tickets to search out (see Tickets > Advanced)
-    #   $format   - an sprintf format for each ticket in the result
-    #               (\t and \t are expanded, the rest is literal
-    #   \@columns - which columns from the ticket to pass to the format
-    # ]
-    $c->stash->{queries} = {
-        bookmarked  => [
-            '(rt.cpan.org) bookmarked tickets',
-            q{ id = '__Bookmarked__' }
-        ],
-        unowned     => [
-            'Unowned new/open tickets',
-            q{ Owner = 'Nobody' AND ( Status = 'new' OR Status = 'open') }
-        ],
-        mine        => [
-            'My tickets',
-            q{ Owner = '__CurrentUser__'
-                AND (  Status = 'new' OR Status = 'open' ) }
-        ],
-    };
- 
-    use File::Basename ();
-    use File::Spec::Functions ();
-    my $script = File::Basename::basename($0);
+    use Term::UI;
+    use Term::ReadLine;
 
-    # where is our rc file?
-    my $rcfile = $ENV{ (uc $script).'_RC' }
-        || File::Spec::Functions::catfile ( 
-                $ENV{HOMEPATH}
-                || $ENV{HOME}
-                || glob ('~'), 
-                ".".$script.".rc"
-    );
-    $c->load_config( $rcfile ) if -f $rcfile;
+    my $term = Term::ReadLine->new('brand');
+    my $DONE; # re-ask until doen
+    ASK: {
 
+        my %from_here;
+        @from_here {
+            my @choices =  (
+                ( (defined $c->config->{host} and defined $c->config->{user})
+                        ? (sprintf "Change user info (currently '%s' as %s)",
+                            $c->config->{host},
+                            $c->config->{user},
+                           )
+                        : 'Enter your details'
+                ),
+                "Test user info",
+                my $default = (sprintf 'Write changes to %s',  $c->stash->{rcfile}),
+                "Write config file elsewhere ...",
+                "leave configuration menu"
+            )
+        } = (
+                sub {
+                    $c->config->{host} = $term->get_reply(
+                                    prompt => 'What is the url of your RT instance? ',
+                                    default => defined $c->config->{host} ? $c->config->{host} : $DEFAULT_RT,
+                                    print_me =>
+"Where can I find request tracker?
+    http://rt.example.com     - when rt is on the root of a domain
+    http://example.com/rt/    - ... or isn't
+    https://httpuser:httppass\@example.com/rt/
+                              - when there is http authentication involved
+"
+                    );
+                    $c->config->{user} = $term->get_reply(
+                                    prompt => 'What is your username? ',
+                                    default => $c->config->{user},
+                    );
+
+                    # use IO::Prompt; $c->config->{pass} = prompt('What is your password? ', -e => '*');
+                    # use Term::ReadKey; ReadMode 'noecho'; my $password = ReadLine; # Corrected ReadMode 'normal'; chomp $password;
+                    $term->get_reply( prompt => 'What is your password? ', default => $c->config->{pass},);
+                },
+                sub {
+                        local $| =1;
+                        print "Connecting to your rt...";
+                        # "connect" to RT ...
+                        my $rt = RT::Client::REST->new(
+                            server => $c->config->{host},
+                            timeout => 30,
+                        );
+
+                        try {
+                            $rt->login(
+                                username => $c->config->{user},
+                                password => $c->config->{pass}
+                            );
+                            print "success!\n";
+                            local $@;
+                            my $me = eval {
+                                $rt->show(type => 'user', id => $c->config->{user})
+                            };
+                            if (! $@) {
+                                printf "You are: %s aka %s <%s> (id=%s)\n",
+                                map defined $_? $_ : '', @{ $me }{ qw[ Name RealName EmailAddress id] };
+                            }
+                        } catch Exception::Class::Base with {
+                            printf "problem logging in: %s\n", shift->message;
+                        };
+                        
+                },
+                sub { eval { $c->write_config($c->stash->{rcfile}) } },
+                sub { 
+                        eval { $c->write_config(
+                                $term->get_reply(
+                                    prompt => (
+                                            sprintf "Would you like me to write this new information to %s?",
+                                            $c->stash->{rcfile},
+                                    )
+                                )
+                                )
+                        }
+                },
+                sub { $DONE =1; 'Thanks for playing.' }
+        );
+
+
+        WHAT_NOW: {
+
+        if (defined $choice) { 
+            $from_here{ $choice }->();
+            undef $choice;
+        }
+        my $reply = $term->get_reply(
+            prompt => 'what now?',
+            choices => \@choices,
+            default => $default,
+        ); 
+
+        $from_here{ $reply }->();
+        redo ASK unless $DONE;
+        }
+
+    }
+    
+    ''
+}
+
+# I'm nearly a plugin
+sub App::Rad::write_config {
+    my $c = shift;
+    my $path  = shift;
+
+    open my $fh, '>', $path or die "can't open $path for writing: $!";
+    print $fh "# sorry for messing up the order of your config file ...\n";
+    print $fh $_, "=", $c->config->{$_}, "\n" for keys %{ $c->config };
+    
+}
+
+# load config, sainity test it, and force the user to provide
+# the details we need to be useful
+sub pre_process {
+    my $c = shift;
+
+    # we don't need $c->stash->{rt} for setup
+    return if $c->cmd eq 'setup';
+
+    print <<"EO_WELCOME"
+
+Hi there,
+
+  I'm $0, pleased to meet you!
+
+  I'm going to keep all the things you tell me in:
+      @{[ $c->stash->{rcfile} ]}
+
+  If you're confused, you can also check
+      perldoc $0
+  although I'll do my best to explain what happened if anything goes wrong...
+
+
+ok, first thing's first
+EO_WELCOME
+    # so, we'll go to configure, then come back and pick up where we left off
+    and configure($c, 'Enter your details')
     # we definately need these ...
-    die  join ("\n", "$rcfile should contain:",
-         "\thost:(the url of an rt instance)",
-         "\tuser:(your rt username)",
-         "\tpass:(your rt password)",
-         "got: " . Data::Dumper::Dumper( $c->config )
-    ) if grep {not exists $c->config->{$_}} qw[ host user pass ];
+    if grep {not exists $c->config->{$_}} qw[ host user pass ];
 
     #
     # settings for how a search will look by default
@@ -141,7 +266,7 @@ sub setup {
     
     # "connect" to RT ...
     $c->stash->{rt} = RT::Client::REST->new(
-        server => $c->config->{host} || 'http://rt.cpan.org/',
+        server => $c->config->{host}  || $DEFAULT_RT,
         timeout => 30,
     );
 
@@ -156,21 +281,89 @@ sub setup {
     };
 }
 
-sub ticket { 
-  my $c=shift;
-  my $rt = $c->stash->{rt};
-  my ($id) = @ARGV;
-  try {
-    # Get ticket #10
-    my $ticket = $rt->show(type => 'ticket', id => $id);
+sub setup {
+  
+    my $c=shift;
+    $c->register_commands( qw[ create ticket search get put ] );
+    $c->register( 'setup', \&configure, 'tell me your rt password' );
 
-    use Data::Dumper();print Data::Dumper::Dumper $ticket;
-  } catch RT::Client::REST::Exception with {
-    return "problem when finding ticket #$id: " . shift->message;
-  };
+    # queries contains a list of saved queries you can run against rt
+    # you can include some in your $c->stash->{rcfile}, they are loaded below 
+    #
+    # each entry in the hash has 4 parts
+    # entries from the config file can overwrite the ones here
+    #    
+    #  $name =>   - this is the name that you use on the command line 
+    #  [
+    #   $label    - a nice descriptive name for the help
+    #   $query    - the tickets to search out (see Tickets > Advanced)
+    #   $format   - an sprintf format for each ticket in the result
+    #               (\t and \t are expanded, the rest is literal
+    #   \@columns - which columns from the ticket to pass to the format
+    # ]
+    $c->stash->{queries} = {
+        bookmarked  => [
+            '(rt.cpan.org) bookmarked tickets',
+            q{ id = '__Bookmarked__' }
+        ],
+        unowned     => [
+            'Unowned new/open tickets',
+            q{ Owner = 'Nobody' AND ( Status = 'new' OR Status = 'open') }
+        ],
+        mine        => [
+            'My tickets',
+            q{ Owner = '__CurrentUser__'
+                AND (  Status = 'new' OR Status = 'open' ) }
+        ],
+    };
+ 
+    use File::Basename ();
+    use File::Spec::Functions ();
+    my $script = File::Basename::basename($0);
+
+    # where is our rc file?
+    $c->stash->{rcfile} = $ENV{ (uc $script).'_RC' }
+        || File::Spec::Functions::catfile ( 
+                $ENV{HOMEPATH}
+                || $ENV{HOME}
+                || glob ('~'), 
+                ".".$script.".rc"
+    );
+    $c->load_config( $c->stash->{rcfile} ) if -f $c->stash->{rcfile};
+
 
 }
 
+=head2 ticket C<< <id> >>
+
+show the current status of a the ticket who's id is passed as the only argument 
+
+=cut
+
+sub ticket :Help('Show the attributes of ticket needs one ticket id') { 
+    my $c=shift;
+    my $rt = $c->stash->{rt};
+    my ($id) = @ARGV;
+    try {
+        # Get ticket #10
+        my $ticket = $rt->show(type => 'ticket', id => $id);
+
+        use Data::Dumper();print Data::Dumper::Dumper $ticket;
+    } catch RT::Client::REST::Exception with {
+        return "problem when finding ticket #$id: " . shift->message;
+    };
+
+}
+
+=head2 search C<< <query-name> >>
+
+Show the results of pre-defined rt ticket searches.
+
+These are specified either directly in the script, or in your C<.rc file>
+
+without arguments, you'll be shown a list of searches
+
+=cut
 
 sub search :Help('Run pre-defined queries'){
     my $c=shift;
@@ -200,18 +393,43 @@ sub search :Help('Run pre-defined queries'){
         my @tickets = map {
                         $rt->show(type => 'ticket', id => $_)
                     } $rt->search(type => 'ticket', query => $query );
-                    print Data::Dumper::Dumper \@tickets;
+                    # print Data::Dumper::Dumper \@tickets;
         for (@tickets){
             printf +($format || $c->stash->{result_format}),
                 @{$_}{ @{ $cols || $c->stash->{result_columns} } }
         }
         print "All done, nice work!\n" unless @tickets;
+        ''
     } catch RT::Client::REST::Exception with {
-        return "bad shit when searching '$query': ". shift->message;
+        return "failed when searching '$query': ". shift->message;
+        ''
     };
 }
 
-sub put {goto &create};
+=head2 put 
+
+an alias of ...
+
+=cut
+
+sub put :Help('Alias of create') {goto &create};
+
+=head2 create C<< --queue=I<QueueName> >> C<< --subject=I<some stuff> >> [C<< --message=I<stuff> >>] < file 
+
+creates a ticket in RT, takes 
+
+C<< --queue=I<QueueName> >> the name of the queue to create the ticket in 
+
+C<< --subject=I<some stuff> >> the subject line for your ticket
+
+Ideally you'd start this with C<[patch]> becasue you're being super helpful
+and submitting fixes for the stuff you're having trouble with 
+
+optionally C<< --message=I<stuff> >> the body of the ticket
+
+if you don't specify this, the ticket body will be read from C<STDIN>
+
+=cut
 
 sub create :Help('create a ticket, requires --queue, --subject and --message') {
     my $c = shift;
@@ -246,7 +464,15 @@ sub create :Help('create a ticket, requires --queue, --subject and --message') {
     );
 }
 
-sub get :Help('print the body of the message that created the ticket. id is the first argument') {
+=head2 get C<< <id> >>
+
+retreive the contents of the transaction that create the ticket who's id you pass
+
+(will make some attempt to get an C<id> from a url)
+
+=cut
+
+sub get :Help('print the body of the message that created the ticket. needs a ticket number') {
 
     my $c=shift;
     my $rt = $c->stash->{rt};
@@ -284,6 +510,29 @@ sub get :Help('print the body of the message that created the ticket. id is the 
 
 }
 
+=head1 FILES/ENVIRONMENT
+
+=head2 C<~/.rtpaste.rc>
+
+you can also set C<$RTPASTE_RC> in your environment to point to a config file instead
+
+internally the script's name (C<$0>) is used to determine both the name for the rc file and the environment variable used to override it...
+
+=head2 symlink trickery
+
+for example:
+ 
+ ln -s mycorp-tickets rtpaste
+
+... will lead to C<mycorp-tickets> checking for C<~/.mycorp-tickets.rc> and looking for C<MYCORP-TICKETS_RC> in the environment
+
+This is the least pesky way I could think of to use many differing RT's as the same user,
+this can be done in your own C<~/bin> (as long as it's in C<$PATH>) or globally by root...
+
+There is no global config file, although you can replace C<$DEFAULT_RT> in the script ...
+
+=cut
+
 # expand \t, \n and \\ in formats
 sub expand  {
     my ($string) = @_;#@return = @_;
@@ -295,5 +544,5 @@ sub spit {
     my $c = shift;
     use Data::Dumper (); 
     delete $c->stash->{rt};
-    Data::Dumper::Dumper( $c->config, $c->stash );
+    Data::Dumper::Dumper( [$c->config, $c->stash] );
 } 

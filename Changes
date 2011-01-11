@@ -1,0 +1,8 @@
+
+0.0002    2011-01-11
+    - rtpaste setup - with some fancy Term::UI based prompting to generate a ~/.rtpaste.rc
+    - some extra cleanup and some decent pod!
+
+0.0001
+    - released by accident by my mis-mastery of Dist::Zilla (and [UploadToCpan]+[FakeRelease])
+    - http://f00li5h.pin21.com/blog/dzil:-a-casual-walkthrough-of-Dist::Zilla.html

@@ -9,7 +9,7 @@ use ExtUtils::MakeMaker 6.31;
 
 
 my %WriteMakefileArgs = (
-  'ABSTRACT' => 'see your tickets from the command line',
+  'ABSTRACT' => 'rtpaste - see your tickets from the command line',
   'AUTHOR' => 'FOOLISH <FOOLISH@cpan.org>',
   'BUILD_REQUIRES' => {
     'Test::More' => '0'
@@ -19,7 +19,6 @@ my %WriteMakefileArgs = (
   },
   'DISTNAME' => 'App-rtpaste',
   'EXE_FILES' => [
-    'bin/rtpaste',
     'bin/rtpaste'
   ],
   'LICENSE' => 'perl',
@@ -30,9 +29,11 @@ my %WriteMakefileArgs = (
     'Error' => '0',
     'File::Basename' => '0',
     'File::Spec::Functions' => '0',
-    'RT::Client::REST' => '0'
+    'RT::Client::REST' => '0',
+    'Term::ReadLine' => '0',
+    'Term::UI' => '0'
   },
-  'VERSION' => '0.0001',
+  'VERSION' => '0.0002',
   'test' => {
     'TESTS' => 't/*.t'
   }
